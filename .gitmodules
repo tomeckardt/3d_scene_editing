@@ -1,0 +1,6 @@
+[submodule "submodules/Inpaint-Anything"]
+	path = submodules/Inpaint-Anything
+	url = https://github.com/geekyutao/Inpaint-Anything.git
+[submodule "submodules/CUT3R"]
+	path = submodules/CUT3R
+	url = https://github.com/CUT3R/CUT3R.git
