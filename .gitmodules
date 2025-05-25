@@ -3,7 +3,7 @@
 	url = https://github.com/geekyutao/Inpaint-Anything.git
 [submodule "submodules/vggt"]
 	path = submodules/vggt
-	url = https://github.com/facebookresearch/vggt
+	url = https://github.com/facebookresearch/vggt.git
 [submodule "submodules/BlenderProc-3DFront"]
 	path = submodules/BlenderProc-3DFront
-	url = https://github.com/yinyunie/BlenderProc-3DFront
+	url = https://github.com/yinyunie/BlenderProc-3DFront.git
