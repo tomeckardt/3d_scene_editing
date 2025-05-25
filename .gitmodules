@@ -1,6 +1,9 @@
 [submodule "submodules/Inpaint-Anything"]
 	path = submodules/Inpaint-Anything
 	url = https://github.com/geekyutao/Inpaint-Anything.git
-[submodule "submodules/CUT3R"]
-	path = submodules/CUT3R
-	url = https://github.com/CUT3R/CUT3R.git
+[submodule "submodules/vggt"]
+	path = submodules/vggt
+	url = https://github.com/facebookresearch/vggt
+[submodule "submodules/BlenderProc-3DFront"]
+	path = submodules/BlenderProc-3DFront
+	url = https://github.com/yinyunie/BlenderProc-3DFront

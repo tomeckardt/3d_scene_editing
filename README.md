@@ -3,5 +3,5 @@
 ### Usage
 IMPORTANT: Use the `--recursive` option to clone this repository.
 ```
-git clone 
+git clone --recursive https://github.com/tomeckardt/3d_scene_editing.git
 ```

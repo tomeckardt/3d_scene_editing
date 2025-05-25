@@ -1,0 +1,13 @@
+torch
+torchvision
+torchaudio
+-e submodules/Inpaint-Anything/segment_anything
+-r submodules/Inpaint-Anything/lama/requirements.txt
+Pillow
+huggingface_hub
+einops
+safetensors
+diffusers
+transformers
+accelerate
+-e submodules/BlenderProc-3DFront
