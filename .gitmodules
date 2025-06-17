@@ -1,9 +1,9 @@
 [submodule "submodules/Inpaint-Anything"]
 	path = submodules/Inpaint-Anything
 	url = https://github.com/geekyutao/Inpaint-Anything.git
-[submodule "submodules/vggt"]
-	path = submodules/vggt
-	url = https://github.com/facebookresearch/vggt.git
 [submodule "submodules/BlenderProc-3DFront"]
 	path = submodules/BlenderProc-3DFront
-	url = https://github.com/yinyunie/BlenderProc-3DFront.git
+	url = https://github.com/tomeckardt/BlenderProc-3DFront
+[submodule "submodules/vggt"]
+	path = submodules/vggt
+	url = https://github.com/tomeckardt/vggt
