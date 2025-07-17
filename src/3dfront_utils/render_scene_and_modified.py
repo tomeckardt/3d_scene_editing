@@ -1,4 +1,5 @@
 import blenderproc as bproc
+from collections import defaultdict
 from typing import Dict, List, Union
 import sys
 import argparse
@@ -38,9 +39,26 @@ def parse_args():
     parser.add_argument("--append_to_existing_output", type=bool, default=True,
                         help="If append new renderings to the existing ones.")
     parser.add_argument("--fov", type=int, default=90, help="Field of view of camera.")
-    parser.add_argument("--res_x", type=int, default=480, help="Image width.")
-    parser.add_argument("--res_y", type=int, default=360, help="Image height.")
+    parser.add_argument("--res_x", type=int, default=224, help="Image width.")
+    parser.add_argument("--res_y", type=int, default=224, help="Image height.")
     return parser.parse_args()
+
+def create_camera_pose(camera_location, look_at_point, up_vector=np.array([0, 0, 1])):
+    forward = (look_at_point - camera_location)
+    forward /= np.linalg.norm(forward)
+
+    right = np.cross(forward, up_vector)
+    right /= np.linalg.norm(right)
+
+    up = np.cross(right, forward)
+
+    rotation = np.eye(4)
+    rotation[:3, 0] = right
+    rotation[:3, 1] = up
+    rotation[:3, 2] = -forward
+    rotation[:3, 3] = camera_location
+
+    return rotation
 
 def assign_room(data: dict, index: int) -> str:
     smap = data["instance_segmaps"][index]
@@ -52,6 +70,7 @@ def assign_room(data: dict, index: int) -> str:
     return max(room_counter.items(), key=lambda x: x[1] if x[0] else -1000)[0]
 
 def write_hdf5(output_dir_path: str, output_data_dict: Dict[str, List[Union[np.ndarray, list, dict]]],
+               furniture_item_names: list[str],
                append_to_existing_output: bool = False, stereo_separate_keys: bool = False):
     """
     Saves the information provided inside of the output_data_dict into a .hdf5 container
@@ -97,8 +116,9 @@ def write_hdf5(output_dir_path: str, output_data_dict: Dict[str, List[Union[np.n
 
         # for each frame a new .hdf5 file is generated
         room = assign_room(output_data_dict, frame)
-        os.makedirs(os.path.join(output_dir_path, room), exist_ok=True)
-        hdf5_path = os.path.join(output_dir_path, room, str(frame + frame_offset) + ".hdf5")
+        furniture_item = furniture_item_names[frame]
+        os.makedirs(os.path.join(output_dir_path, room, furniture_item), exist_ok=True)
+        hdf5_path = os.path.join(output_dir_path, room, furniture_item, str(frame + frame_offset) + ".hdf5")
         with h5py.File(hdf5_path, "w") as file:
             # Go through all the output types
             print(f"Merging data for frame {frame} into {hdf5_path}")
@@ -125,7 +145,7 @@ def write_hdf5(output_dir_path: str, output_data_dict: Dict[str, List[Union[np.n
 
 def render_scene(
     front_json: str, scene_output_folder: Path,
-    materials: dict = {}, cam_Ts: list = [], return_parameters: bool = False
+    materials: dict = {}, cam_Ts: list = [], targeted_furniture_items: list[str] = [], return_parameters: bool = False
 ):
     try:
         with time_limit(600): # per scene generation would not exceeds X seconds.
@@ -165,6 +185,16 @@ def render_scene(
                 front_3D_texture_path=str(front_3D_texture_folder),
                 label_mapping=mapping,
                 model_id_to_label=model_id_to_label)
+
+            categories_of_interest = ["bed", "sofa", "chair", "table"]
+            mesh_positions = np.array([
+                obj.get_location() for obj in loaded_objects 
+                if any(cname in obj.get_name().lower() for cname in categories_of_interest)
+            ])
+            mesh_names = np.array([
+                obj.get_name() for obj in loaded_objects 
+                if any(cname in obj.get_name().lower() for cname in categories_of_interest)
+            ])
 
             # -------------------------------------------------------------------------
             #          Sample materials
@@ -244,7 +274,7 @@ def render_scene(
             floor_areas = np.array(point_sampler.get_floor_areas())
             cam_nums = np.ceil(floor_areas / floor_areas.sum() * n_cameras).astype(np.int16)
             n_tries = cam_nums * 3
-
+            
             if cam_Ts:
                 for cam in cam_Ts:
                     bproc.camera.add_camera_pose(cam)
@@ -252,14 +282,18 @@ def render_scene(
                 for floor_id, cam_num_per_scene in enumerate(cam_nums):
                     cam2world_matrices = []
                     coverage_scores = []
+                    mesh_indices = []
                     tries = 0
                     while tries < n_tries[floor_id]:
                         # sample cam loc inside house
                         height = np.random.uniform(1.4, 1.8)
                         location = point_sampler.sample_by_floor_id(height, floor_id=floor_id)
+                        index = np.argmin(np.linalg.norm(mesh_positions - location[None], axis=1))
+                        closest_mesh_pos = mesh_positions[index]
                         # Sample rotation (fix around X and Y axis)
-                        rotation = np.random.uniform([1.2217, 0, 0], [1.338, 0, np.pi * 2])  # pitch, roll, yaw
-                        cam2world_matrix = bproc.math.build_transformation_mat(location, rotation)
+                        # rotation = np.random.uniform([1.2217, 0, 0], [1.338, 0, np.pi * 2])  # pitch, roll, yaw
+                        # cam2world_matrix = bproc.math.build_transformation_mat(location, rotation)
+                        cam2world_matrix = create_camera_pose(location, closest_mesh_pos)
 
                         # Check that obstacles are at least 1 meter away from the camera and have an average distance between 2.5 and 3.5
                         # meters and make sure that no background is visible, finally make sure the view is interesting enough
@@ -270,12 +304,16 @@ def render_scene(
                         if obstacle_check and coverage_score >= 0.5:
                             cam2world_matrices.append(cam2world_matrix)
                             coverage_scores.append(coverage_score)
+                            mesh_indices.append(index)
                             tries += 1
                     cam_ids = np.argsort(coverage_scores)[-cam_num_per_scene:]
                     for cam_id, cam2world_matrix in enumerate(cam2world_matrices):
                         if cam_id in cam_ids:
                             bproc.camera.add_camera_pose(cam2world_matrix)
                             cam_Ts.append(cam2world_matrix)
+                            item_name: str = mesh_names[mesh_indices[cam_id]]
+                            item_name = item_name.split(".")[0].replace("/", "").replace(" ", "")
+                            targeted_furniture_items.append(item_name)
 
             # render the whole pipeline
             # bproc.renderer.enable_normals_output()
@@ -290,10 +328,10 @@ def render_scene(
             data['cam_Ts'] = cam_Ts
             # write the data to a .hdf5 container
             write_hdf5(str(scene_output_folder), data,
-                                    append_to_existing_output=args.append_to_existing_output)
+                                    append_to_existing_output=args.append_to_existing_output, furniture_item_names=targeted_furniture_items)
             print('Time elapsed: %f.' % (time()-start_time))
             if return_parameters:
-                return materials, cam_Ts
+                return materials, cam_Ts, targeted_furniture_items
 
     except TimeoutException as e:
         print('Time is out: %s.' % scene_name)
@@ -377,5 +415,8 @@ if __name__ == '__main__':
         n_cameras = n_cameras - existing_n_renderings
 
     bproc.renderer.enable_depth_output(activate_antialiasing=False)
-    materials, cam_Ts = render_scene(front_json=front_json, scene_output_folder=scene_output_folder, return_parameters=True)
-    render_scene(front_json=args.modified_front_json, scene_output_folder=modified_scene_output_folder, materials=materials, cam_Ts=cam_Ts, return_parameters=False)
+    materials, cam_Ts, targeted_items = render_scene(front_json=front_json, scene_output_folder=scene_output_folder, return_parameters=True)
+    render_scene(
+        front_json=args.modified_front_json, scene_output_folder=modified_scene_output_folder, 
+        targeted_furniture_items=targeted_items,
+        materials=materials, cam_Ts=cam_Ts, return_parameters=False)
