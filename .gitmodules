@@ -7,3 +7,6 @@
 [submodule "submodules/vggt"]
 	path = submodules/vggt
 	url = https://github.com/tomeckardt/vggt
+[submodule "submodules/dust3r"]
+	path = submodules/dust3r
+	url = https://github.com/tomeckardt/dust3r

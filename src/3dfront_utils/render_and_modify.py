@@ -143,9 +143,51 @@ def write_hdf5(output_dir_path: str, output_data_dict: Dict[str, List[Union[np.n
                 WriterUtility._write_to_hdf_file(file, "blender_proc_version", np.string_(blender_proc_version))
 
 
+def load_objects(front_json, future_folder, front_3D_texture_folder, cc_material_folder) -> list[MeshObject]:
+    # read 3d future model info
+    with open('submodules/BlenderProc-3DFront/examples/datasets/front_3d_with_improved_mat/model_info_revised.json', 'r') as f:
+        model_info_data = json.load(f)
+    mapping_file = bproc.utility.resolve_resource(os.path.join("front_3D", "blender_label_mapping.csv"))
+    mapping = bproc.utility.LabelIdMapping.from_csv(mapping_file)
+    model_id_to_label = {
+        m["model_id"]: m["category"].lower().replace(" / ", "/") 
+        if m["category"] else 'others' for m in model_info_data
+    }
+    loaded_objects = bproc.loader.load_front3d(
+                json_path=str(front_json),
+                future_model_path=str(future_folder),
+                front_3D_texture_path=str(front_3D_texture_folder),
+                label_mapping=mapping,
+                model_id_to_label=model_id_to_label)
+    cc_materials = bproc.loader.load_ccmaterials(cc_material_folder, ["Bricks", "Wood", "Carpet", "Tile", "Marble"])
+    floors: List[MeshObject] = bproc.filter.by_attr(loaded_objects, "name", "Floor.*", regex=True) # type: ignore
+    for floor in floors:
+        # For each material of the object
+        materials = [random.randint(0, len(cc_materials)-1) for _ in floor.get_materials()]
+        for i, m in enumerate(materials):
+            floor.set_material(i, cc_materials[m])
+
+    baseboards_and_doors = bproc.filter.by_attr(loaded_objects, "name", "Baseboard.*|Door.*", regex=True) # type: ignore
+    wood_floor_materials = bproc.filter.by_cp(cc_materials, "asset_name", "WoodFloor.*", regex=True) # type: ignore
+    for obj in baseboards_and_doors:
+        # For each material of the object
+        materials = [random.randint(0, len(wood_floor_materials)-1) for _ in obj.get_materials()] # type: ignore
+        for i, m in enumerate(materials):
+            obj.set_material(i, wood_floor_materials[m]) # type: ignore
+
+    walls = bproc.filter.by_attr(loaded_objects, "name", "Wall.*", regex=True) # type: ignore
+    marble_materials = bproc.filter.by_cp(cc_materials, "asset_name", "Marble.*", regex=True) # type: ignore
+    for wall in walls:
+        # For each material of the object
+        materials = [random.randint(0, len(marble_materials)-1) for _ in wall.get_materials()] # type: ignore
+        for i, m in enumerate(materials):
+            wall.set_material(i, marble_materials[m]) # type: ignore
+    return loaded_objects
+
+
 def render_scene(
-    front_json: str, scene_output_folder: Path,
-    materials: dict = {}, cam_Ts: list = [], targeted_furniture_items: list[str] = [], return_parameters: bool = False
+    front_json: str, future_folder: str, front_3d_texture_folder: str, cc_material_folder: str, 
+    scene_output_folder: Path, modified_scene_output_folder: Path
 ):
     try:
         with time_limit(600): # per scene generation would not exceeds X seconds.
@@ -153,9 +195,6 @@ def render_scene(
 
             bproc.init()
             RendererUtility.set_max_amount_of_samples(32)
-
-            mapping_file = bproc.utility.resolve_resource(os.path.join("front_3D", "blender_label_mapping.csv"))
-            mapping = bproc.utility.LabelIdMapping.from_csv(mapping_file)
 
             # set the light bounces
             bproc.renderer.set_light_bounces(diffuse_bounces=200, glossy_bounces=200, max_bounces=200,
@@ -171,73 +210,23 @@ def render_scene(
             if not cam_intrinsic_path.exists():
                 np.save(str(cam_intrinsic_path), cam_K)
 
-            # read 3d future model info
-            with open('submodules/BlenderProc-3DFront/examples/datasets/front_3d_with_improved_mat/model_info_revised.json', 'r') as f:
-                model_info_data = json.load(f)
-            model_id_to_label = {m["model_id"]: m["category"].lower().replace(" / ", "/") if m["category"] else 'others' for
-                                 m in
-                                 model_info_data}
-
             # load the front 3D objects
-            loaded_objects = bproc.loader.load_front3d(
-                json_path=str(front_json),
-                future_model_path=str(future_folder),
-                front_3D_texture_path=str(front_3D_texture_folder),
-                label_mapping=mapping,
-                model_id_to_label=model_id_to_label)
-
+            loaded_objects = load_objects(front_json, future_folder, front_3d_texture_folder, cc_material_folder)
+            print("### Loaded objects ###")
             categories_of_interest = ["bed", "sofa", "chair", "table"]
+            rooms_and_meshes = defaultdict(list)
+            for obj in loaded_objects:
+                if isinstance(obj, MeshObject) and any(cname in obj.get_name().lower() for cname in categories_of_interest):
+                    rooms_and_meshes[obj.get_cp("room_id")].append(obj)
+            selected_meshes = {r: random.choice(m) for r, m in rooms_and_meshes.items()}
             mesh_positions = np.array([
-                obj.get_location() for obj in loaded_objects 
+                obj.get_location() for obj in selected_meshes.values() 
                 if any(cname in obj.get_name().lower() for cname in categories_of_interest)
             ])
             mesh_names = np.array([
-                obj.get_name() for obj in loaded_objects 
+                obj.get_name() for obj in selected_meshes.values() 
                 if any(cname in obj.get_name().lower() for cname in categories_of_interest)
             ])
-
-            # -------------------------------------------------------------------------
-            #          Sample materials
-            # -------------------------------------------------------------------------
-            cc_materials = bproc.loader.load_ccmaterials(args.cc_material_folder, ["Bricks", "Wood", "Carpet", "Tile", "Marble"])
-
-            floors: List[MeshObject] = bproc.filter.by_attr(loaded_objects, "name", "Floor.*", regex=True)
-            for floor in floors:
-                # For each material of the object
-                uid = floor.get_cp("uid")
-                if uid in materials:
-                    for i, m in enumerate(materials[uid]):
-                        floor.set_material(i, cc_materials[m])
-                else:
-                    materials[uid] = [random.randint(0, len(cc_materials)-1) for _ in floor.get_materials()]
-                    for i, m in enumerate(materials[uid]):
-                        floor.set_material(i, cc_materials[m])
-
-            baseboards_and_doors = bproc.filter.by_attr(loaded_objects, "name", "Baseboard.*|Door.*", regex=True)
-            wood_floor_materials = bproc.filter.by_cp(cc_materials, "asset_name", "WoodFloor.*", regex=True)
-            for obj in baseboards_and_doors:
-                # For each material of the object
-                uid = obj.get_cp("uid")
-                if uid in materials:
-                    for i, m in enumerate(materials[uid]):
-                        obj.set_material(i, wood_floor_materials[m])
-                else:
-                    materials[uid] = [random.randint(0, len(wood_floor_materials)-1) for _ in obj.get_materials()]
-                    for i, m in enumerate(materials[uid]):
-                        obj.set_material(i, wood_floor_materials[m])
-
-            walls = bproc.filter.by_attr(loaded_objects, "name", "Wall.*", regex=True)
-            marble_materials = bproc.filter.by_cp(cc_materials, "asset_name", "Marble.*", regex=True)
-            for wall in walls:
-                # For each material of the object
-                uid = wall.get_cp("uid")
-                if uid in materials:
-                    for i, m in enumerate(materials[uid]):
-                        wall.set_material(i, marble_materials[m])
-                else:
-                    materials[uid] = [random.randint(0, len(marble_materials)-1) for _ in wall.get_materials()]
-                    for i, m in enumerate(materials[uid]):
-                        wall.set_material(i, marble_materials[m])
 
             # -------------------------------------------------------------------------
             #          Sample camera extrinsics
@@ -275,45 +264,43 @@ def render_scene(
             cam_nums = np.ceil(floor_areas / floor_areas.sum() * n_cameras).astype(np.int16)
             n_tries = cam_nums * 3
             
-            if cam_Ts:
-                for cam in cam_Ts:
-                    bproc.camera.add_camera_pose(cam)
-            else:
-                for floor_id, cam_num_per_scene in enumerate(cam_nums):
-                    cam2world_matrices = []
-                    coverage_scores = []
-                    mesh_indices = []
-                    tries = 0
-                    while tries < n_tries[floor_id]:
-                        # sample cam loc inside house
-                        height = np.random.uniform(1.4, 1.8)
-                        location = point_sampler.sample_by_floor_id(height, floor_id=floor_id)
-                        index = np.argmin(np.linalg.norm(mesh_positions - location[None], axis=1))
-                        closest_mesh_pos = mesh_positions[index]
-                        # Sample rotation (fix around X and Y axis)
-                        # rotation = np.random.uniform([1.2217, 0, 0], [1.338, 0, np.pi * 2])  # pitch, roll, yaw
-                        # cam2world_matrix = bproc.math.build_transformation_mat(location, rotation)
-                        cam2world_matrix = create_camera_pose(location, closest_mesh_pos)
+            cam_Ts = []
+            targeted_furniture_items = []
+            for floor_id, cam_num_per_scene in enumerate(cam_nums):
+                cam2world_matrices = []
+                coverage_scores = []
+                mesh_indices = []
+                tries = 0
+                while tries < n_tries[floor_id]:
+                    # sample cam loc inside house
+                    height = np.random.uniform(1.4, 1.8)
+                    location = point_sampler.sample_by_floor_id(height, floor_id=floor_id)
+                    index = np.argmin(np.linalg.norm(mesh_positions - location[None], axis=1))
+                    closest_mesh_pos = mesh_positions[index]
+                    # Sample rotation (fix around X and Y axis)
+                    # rotation = np.random.uniform([1.2217, 0, 0], [1.338, 0, np.pi * 2])  # pitch, roll, yaw
+                    # cam2world_matrix = bproc.math.build_transformation_mat(location, rotation)
+                    cam2world_matrix = create_camera_pose(location, closest_mesh_pos)
 
-                        # Check that obstacles are at least 1 meter away from the camera and have an average distance between 2.5 and 3.5
-                        # meters and make sure that no background is visible, finally make sure the view is interesting enough
-                        obstacle_check = bproc.camera.perform_obstacle_in_view_check(cam2world_matrix, proximity_checks, bvh_tree)
-                        coverage_score = bproc.camera.scene_coverage_score(cam2world_matrix, special_objects,
-                                                                        special_objects_weight=special_object_scores)
-                        # for sanity check
-                        if obstacle_check and coverage_score >= 0.5:
-                            cam2world_matrices.append(cam2world_matrix)
-                            coverage_scores.append(coverage_score)
-                            mesh_indices.append(index)
-                            tries += 1
-                    cam_ids = np.argsort(coverage_scores)[-cam_num_per_scene:]
-                    for cam_id, cam2world_matrix in enumerate(cam2world_matrices):
-                        if cam_id in cam_ids:
-                            bproc.camera.add_camera_pose(cam2world_matrix)
-                            cam_Ts.append(cam2world_matrix)
-                            item_name: str = mesh_names[mesh_indices[cam_id]]
-                            item_name = item_name.split(".")[0].replace("/", "").replace(" ", "")
-                            targeted_furniture_items.append(item_name)
+                    # Check that obstacles are at least 1 meter away from the camera and have an average distance between 2.5 and 3.5
+                    # meters and make sure that no background is visible, finally make sure the view is interesting enough
+                    obstacle_check = bproc.camera.perform_obstacle_in_view_check(cam2world_matrix, proximity_checks, bvh_tree)
+                    coverage_score = bproc.camera.scene_coverage_score(cam2world_matrix, special_objects,
+                                                                    special_objects_weight=special_object_scores)
+                    # for sanity check
+                    if obstacle_check and coverage_score >= 0.5:
+                        cam2world_matrices.append(cam2world_matrix)
+                        coverage_scores.append(coverage_score)
+                        mesh_indices.append(index)
+                        tries += 1
+                cam_ids = np.argsort(coverage_scores)[-cam_num_per_scene:]
+                for cam_id, cam2world_matrix in enumerate(cam2world_matrices):
+                    if cam_id in cam_ids:
+                        bproc.camera.add_camera_pose(cam2world_matrix)
+                        cam_Ts.append(cam2world_matrix)
+                        item_name: str = mesh_names[mesh_indices[cam_id]]
+                        item_name = item_name.split(".")[0].replace("/", "").replace(" ", "")
+                        targeted_furniture_items.append(item_name)
 
             # render the whole pipeline
             # bproc.renderer.enable_normals_output()
@@ -328,10 +315,44 @@ def render_scene(
             data['cam_Ts'] = cam_Ts
             # write the data to a .hdf5 container
             write_hdf5(str(scene_output_folder), data,
-                                    append_to_existing_output=args.append_to_existing_output, furniture_item_names=targeted_furniture_items)
+                append_to_existing_output=args.append_to_existing_output, furniture_item_names=targeted_furniture_items)
+
+            """
+            rooms_and_meshes = defaultdict(list)
+            for obj in loaded_objects:
+                if isinstance(obj, MeshObject) and any(cname in obj.get_name().lower() for cname in categories_of_interest):
+                    rooms_and_meshes[obj.get_cp("room_id")].append(obj)
+            with open("debug.txt", "w") as f:
+                for _, objs in rooms_and_meshes.items():
+                    chosen_obj = random.choice(objs)
+                    f.write(f"Hiding {chosen_obj.get_name()}\n")
+                    chosen_obj.hide()
+            """
+
+            # Beds and sofas usually consist of multiple objects. Assumption: A specific bed or sofa is not copied
+            large_objects = ["bed", "sofa"]
+
+            with open("debug.txt", "w") as f:
+                for obj in selected_meshes.values():
+                    f.write(f"Hiding {obj.get_name()} ({obj.blender_obj.instance_type}, {obj.blender_obj.data.users})\n")
+                    if "." in obj.get_name() and any(n in obj.get_name().lower() for n in large_objects):
+                        query = obj.get_name().split(".")[0]
+                        for o in filter(lambda x: isinstance(x, MeshObject) and query in x.get_name(), loaded_objects):
+                            o.hide()
+                    else:
+                        obj.hide()
+
+            data = bproc.renderer.render()            
+            data.update(bproc.renderer.render_segmap(
+                map_by=["instance", "class", "cp_uid", "cp_jid", "cp_inst_mark", "cp_room_id", "location"],
+                default_values=default_values))
+            data['cam_Ts'] = cam_Ts
+            write_hdf5(
+                str(modified_scene_output_folder), data, append_to_existing_output=args.append_to_existing_output, 
+                furniture_item_names=targeted_furniture_items
+            )
+
             print('Time elapsed: %f.' % (time()-start_time))
-            if return_parameters:
-                return materials, cam_Ts, targeted_furniture_items
 
     except TimeoutException as e:
         print('Time is out: %s.' % scene_name)
@@ -415,8 +436,8 @@ if __name__ == '__main__':
         n_cameras = n_cameras - existing_n_renderings
 
     bproc.renderer.enable_depth_output(activate_antialiasing=False)
-    materials, cam_Ts, targeted_items = render_scene(front_json=front_json, scene_output_folder=scene_output_folder, return_parameters=True)
     render_scene(
-        front_json=args.modified_front_json, scene_output_folder=modified_scene_output_folder, 
-        targeted_furniture_items=targeted_items,
-        materials=materials, cam_Ts=cam_Ts, return_parameters=False)
+        front_json=front_json, front_3d_texture_folder=front_3D_texture_folder,
+        future_folder=future_folder, scene_output_folder=scene_output_folder, cc_material_folder=args.cc_material_folder,
+        modified_scene_output_folder=modified_scene_output_folder
+    )
