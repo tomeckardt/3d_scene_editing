@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 from random import sample
 
-def generate_split(d: Path, train_ratio: float = 0.8, min_num_views: int = 5) -> tuple[dict, dict]:
+def generate_split(d: Path, train_ratio: float = 0.8, min_num_views: int = 15) -> tuple[dict, dict]:
     train_dict = {}
     test_dict = {}
     for scene in filter(lambda x: x.is_dir(), d.iterdir()):

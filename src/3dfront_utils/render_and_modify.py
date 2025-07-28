@@ -29,7 +29,7 @@ def parse_args():
     parser.add_argument("future_folder", help="Path to the 3D Future Model folder.")
     parser.add_argument("front_3D_texture_folder", help="Path to the 3D FRONT texture folder.")
     parser.add_argument("front_json", help="Path to a 3D FRONT scene json file, e.g.6a0e73bc-d0c4-4a38-bfb6-e083ce05ebe9.json.")
-    parser.add_argument("modified_front_json")
+    # parser.add_argument("modified_front_json")
     parser.add_argument('cc_material_folder', nargs='?', default="resources/cctextures",
                         help="Path to CCTextures folder, see the /scripts for the download script.")
     parser.add_argument("output_folder", nargs='?', default="renderings",
@@ -70,7 +70,7 @@ def assign_room(data: dict, index: int) -> str:
     return max(room_counter.items(), key=lambda x: x[1] if x[0] else -1000)[0]
 
 def write_hdf5(output_dir_path: str, output_data_dict: Dict[str, List[Union[np.ndarray, list, dict]]],
-               furniture_item_names: list[str],
+               furniture_item_names: list[str], target_rooms: list[str],
                append_to_existing_output: bool = False, stereo_separate_keys: bool = False):
     """
     Saves the information provided inside of the output_data_dict into a .hdf5 container
@@ -115,8 +115,11 @@ def write_hdf5(output_dir_path: str, output_data_dict: Dict[str, List[Union[np.n
     for frame in range(bpy.context.scene.frame_start, bpy.context.scene.frame_end):
 
         # for each frame a new .hdf5 file is generated
+        target_room = target_rooms[frame]
         room = assign_room(output_data_dict, frame)
-        furniture_item = furniture_item_names[frame]
+        if target_room != room:
+            continue
+        furniture_item = furniture_item_names[frame].split(".")[0].replace("/", "").replace(" ", "")
         os.makedirs(os.path.join(output_dir_path, room, furniture_item), exist_ok=True)
         hdf5_path = os.path.join(output_dir_path, room, furniture_item, str(frame + frame_offset) + ".hdf5")
         with h5py.File(hdf5_path, "w") as file:
@@ -217,6 +220,9 @@ def render_scene(
             rooms_and_meshes = defaultdict(list)
             for obj in loaded_objects:
                 if isinstance(obj, MeshObject) and any(cname in obj.get_name().lower() for cname in categories_of_interest):
+                    if obj.get_cp("jid") == "":
+                        print("Skipping", obj.get_name())
+                        continue
                     rooms_and_meshes[obj.get_cp("room_id")].append(obj)
             selected_meshes = {r: random.choice(m) for r, m in rooms_and_meshes.items()}
             mesh_positions = np.array([
@@ -299,7 +305,6 @@ def render_scene(
                         bproc.camera.add_camera_pose(cam2world_matrix)
                         cam_Ts.append(cam2world_matrix)
                         item_name: str = mesh_names[mesh_indices[cam_id]]
-                        item_name = item_name.split(".")[0].replace("/", "").replace(" ", "")
                         targeted_furniture_items.append(item_name)
 
             # render the whole pipeline
@@ -314,8 +319,11 @@ def render_scene(
             # write camera extrinsics
             data['cam_Ts'] = cam_Ts
             # write the data to a .hdf5 container
+            target_rooms = [bproc.filter.by_attr(loaded_objects, "name", name)[0].get_cp("room_id") for name in targeted_furniture_items]
             write_hdf5(str(scene_output_folder), data,
-                append_to_existing_output=args.append_to_existing_output, furniture_item_names=targeted_furniture_items)
+                append_to_existing_output=args.append_to_existing_output, furniture_item_names=targeted_furniture_items,
+                target_rooms=target_rooms
+                )
 
             """
             rooms_and_meshes = defaultdict(list)
@@ -329,18 +337,15 @@ def render_scene(
                     chosen_obj.hide()
             """
 
-            # Beds and sofas usually consist of multiple objects. Assumption: A specific bed or sofa is not copied
-            large_objects = ["bed", "sofa"]
-
-            with open("debug.txt", "w") as f:
+            with open("debug.txt", "a") as f:
+                f.write("### " + scene_name + " ###\n")
                 for obj in selected_meshes.values():
-                    f.write(f"Hiding {obj.get_name()} ({obj.blender_obj.instance_type}, {obj.blender_obj.data.users})\n")
-                    if "." in obj.get_name() and any(n in obj.get_name().lower() for n in large_objects):
-                        query = obj.get_name().split(".")[0]
-                        for o in filter(lambda x: isinstance(x, MeshObject) and query in x.get_name(), loaded_objects):
-                            o.hide()
-                    else:
-                        obj.hide()
+                    # jid = obj.get_cp("jid")
+                    inst = obj.get_cp("inst_mark")
+                    objs = [o for o in loaded_objects if o.get_cp("inst_mark") == inst]
+                    f.write(f"Hiding {', '.join(o.get_name() for o in objs)} ({obj.blender_obj.instance_type}, {obj.blender_obj.data.users})\n")
+                    for o in objs:
+                        o.hide()
 
             data = bproc.renderer.render()            
             data.update(bproc.renderer.render_segmap(
@@ -349,7 +354,7 @@ def render_scene(
             data['cam_Ts'] = cam_Ts
             write_hdf5(
                 str(modified_scene_output_folder), data, append_to_existing_output=args.append_to_existing_output, 
-                furniture_item_names=targeted_furniture_items
+                furniture_item_names=targeted_furniture_items, target_rooms=target_rooms
             )
 
             print('Time elapsed: %f.' % (time()-start_time))
@@ -358,13 +363,13 @@ def render_scene(
         print('Time is out: %s.' % scene_name)
         with open(failed_scene_name_file, 'a') as file:
             file.write(scene_name + "\n")
-        sys.exit(0)
+        # sys.exit(0)
     except Exception as e:
         print(''.join(traceback.format_exception(type(e), e, e.__traceback__)))
         print('Failed scene name: %s.' % scene_name)
         with open(failed_scene_name_file, 'a') as file:
             file.write(scene_name + "\n")
-        sys.exit(0)
+        # sys.exit(0)
 
 
 class TimeoutException(Exception): pass
@@ -399,45 +404,46 @@ if __name__ == '__main__':
     '''Parse folders / file paths'''
     args = parse_args()
     front_folder, future_folder, front_3D_texture_folder, cc_material_folder, output_folder = get_folders(args)
-    front_json = front_folder.joinpath(args.front_json)
-    n_cameras = args.n_views_per_scene
-
-    failed_scene_name_file = output_folder.parent.joinpath('failed_scene_names.txt')
-
-    cam_intrinsic_path = output_folder.joinpath('cam_K.npy')
-
-    if not front_folder.exists() or not future_folder.exists() \
-            or not front_3D_texture_folder.exists() or not cc_material_folder.exists():
-        raise Exception("One of these folders does not exist!")
-
-    scene_name = front_json.name[:-len(front_json.suffix)]
-    print('Processing scene name: %s.' % (scene_name))
-
-    '''Pass those failure cases'''
-    if failed_scene_name_file.is_file():
-        with open(failed_scene_name_file, 'r') as file:
-            failure_scenes = file.read().splitlines()
-        if scene_name in failure_scenes:
-            print('File in failure log: %s. Continue.' % (scene_name))
-            sys.exit(0)
-
-    '''Pass already generated scenes.'''
-    scene_output_folder = output_folder.joinpath(scene_name)
-    modified_scene_output_folder = Path(str(scene_output_folder) + "_modified")
-    existing_n_renderings = 0
-
-    if scene_output_folder.is_dir():
-        existing_n_renderings = len(list(scene_output_folder.iterdir()))
-        if existing_n_renderings >= n_cameras:
-            print('Scene %s is already generated.' % (scene_output_folder.name))
-            sys.exit(0)
-
-    if args.append_to_existing_output:
-        n_cameras = n_cameras - existing_n_renderings
-
     bproc.renderer.enable_depth_output(activate_antialiasing=False)
-    render_scene(
-        front_json=front_json, front_3d_texture_folder=front_3D_texture_folder,
-        future_folder=future_folder, scene_output_folder=scene_output_folder, cc_material_folder=args.cc_material_folder,
-        modified_scene_output_folder=modified_scene_output_folder
-    )
+    for front_json in os.listdir(front_folder)[1:25]:
+        front_json = front_folder.joinpath(front_json)
+        n_cameras = args.n_views_per_scene
+
+        failed_scene_name_file = output_folder.parent.joinpath('failed_scene_names.txt')
+        cam_intrinsic_path = output_folder.joinpath('cam_K.npy')
+
+        if not front_folder.exists() or not future_folder.exists() \
+                or not front_3D_texture_folder.exists() or not cc_material_folder.exists():
+            raise Exception("One of these folders does not exist!")
+
+        scene_name = front_json.name[:-len(front_json.suffix)]
+        print('Processing scene name: %s.' % (scene_name))
+
+        '''Pass those failure cases'''
+        if failed_scene_name_file.is_file():
+            with open(failed_scene_name_file, 'r') as file:
+                failure_scenes = file.read().splitlines()
+            if scene_name in failure_scenes:
+                print('File in failure log: %s. Continue.' % (scene_name))
+                # sys.exit(0)
+                continue
+
+        '''Pass already generated scenes.'''
+        scene_output_folder = output_folder.joinpath(scene_name)
+        modified_scene_output_folder = Path(str(scene_output_folder) + "_modified")
+        existing_n_renderings = 0
+
+        if scene_output_folder.is_dir():
+            existing_n_renderings = len(list(scene_output_folder.iterdir()))
+            if existing_n_renderings >= n_cameras:
+                print('Scene %s is already generated.' % (scene_output_folder.name))
+                sys.exit(0)
+
+        if args.append_to_existing_output:
+            n_cameras = n_cameras - existing_n_renderings
+
+        render_scene(
+            front_json=front_json, front_3d_texture_folder=front_3D_texture_folder,
+            future_folder=future_folder, scene_output_folder=scene_output_folder, cc_material_folder=args.cc_material_folder,
+            modified_scene_output_folder=modified_scene_output_folder
+        )
